@@ -1,0 +1,278 @@
+{
+  "_meta": {
+    "database": "PostgreSQL",
+    "timezone": "Asia/Jakarta (WIB, UTC+7)",
+    "columnNamingConvention": "camelCase — all column names must be double-quoted in raw SQL (e.g. \"invoiceNumber\", \"serviceId\")",
+    "softDeletes": "Most tables have a \"deletedAt\" column. Always add WHERE \"deletedAt\" IS NULL unless explicitly querying deleted records.",
+    "timestamps": "All tables have \"createdAt\" and \"updatedAt\". Dates are stored in UTC; display in WIB (UTC+7).",
+    "currency": "All monetary amounts are in IDR (Indonesian Rupiah), stored as DECIMAL(15,2)."
+  },
+  "tables": [
+    {
+      "name": "orders",
+      "description": "Core transaction table. Every payment attempt creates one order. Contains the full lifecycle of a transaction from creation to settlement. This is the primary table for almost all queries.",
+      "softDelete": true,
+      "columns": [
+        { "name": "id", "type": "UUID", "nullable": false, "description": "Primary key" },
+        { "name": "invoiceNumber", "type": "VARCHAR", "nullable": true, "description": "Human-readable invoice number from the ticketing system (e.g. INV-2024-001234). Use this to look up a specific order." },
+        { "name": "invoiceData", "type": "TEXT (JSON)", "nullable": true, "description": "JSON blob with full invoice/booking details sent by the ticketing system. Contains passenger names, departure, destination, seat info, etc." },
+        { "name": "ticketData", "type": "TEXT (JSON)", "nullable": true, "description": "JSON blob with issued ticket data after successful payment." },
+        { "name": "serviceId", "type": "UUID", "nullable": true, "description": "FK → services.id. Which payment service (gateway + type + provider combination) was assigned to this order." },
+        { "name": "status", "type": "ENUM", "nullable": true, "description": "Current order status. Values: 'unpaid' (created, awaiting payment), 'paid' (payment received), 'done' (confirmed/settled), 'refund' (refunded), 'cancel' (cancelled), 'expire' (expired without payment)." },
+        { "name": "orderDate", "type": "TIMESTAMP", "nullable": true, "description": "When the order was initiated/submitted by the ticketing system." },
+        { "name": "paymentDate", "type": "TIMESTAMP", "nullable": true, "description": "When payment was confirmed by the payment gateway. NULL means payment has not been received yet." },
+        { "name": "amount", "type": "DECIMAL(15,2)", "nullable": false, "description": "Gross payment amount in IDR (what the customer pays)." },
+        { "name": "serviceFee", "type": "DECIMAL(15,2)", "nullable": true, "description": "Service/transaction fee charged by the payment gateway in IDR." },
+        { "name": "netAmount", "type": "DECIMAL(15,2)", "nullable": true, "description": "Net amount received after deducting service fees (amount - serviceFee)." },
+        { "name": "pgName", "type": "VARCHAR", "nullable": true, "description": "Name of the payment gateway used (e.g. 'Xendit', 'DOKU', 'Finnet'). Denormalised from payment_gateways for quick access." },
+        { "name": "paymentType", "type": "VARCHAR", "nullable": true, "description": "Payment method type name (e.g. 'Virtual Account', 'Credit Card', 'QR Code'). Denormalised from payment_types." },
+        { "name": "paymentProvider", "type": "VARCHAR", "nullable": true, "description": "Bank or e-wallet used (e.g. 'BCA', 'BRI', 'BNI', 'OVO', 'DANA'). Denormalised from payment_providers." },
+        { "name": "vaNumber", "type": "VARCHAR", "nullable": true, "description": "Virtual Account number assigned to this order. Only populated for VA payment type orders." },
+        { "name": "webhookPassStatus", "type": "TEXT", "nullable": true, "description": "Status of the webhook notification sent to the ticketing system. Indicates if the notification was successfully delivered." },
+        { "name": "clientId", "type": "UUID", "nullable": true, "description": "FK → clients.id. Which merchant/client submitted this order." },
+        { "name": "orderFrom", "type": "VARCHAR", "nullable": true, "description": "Source system identifier — where the order originated." },
+        { "name": "ticketOffice", "type": "VARCHAR", "nullable": true, "description": "Ticket office or channel code from the ticketing system." },
+        { "name": "payChannel", "type": "INTEGER", "nullable": true, "description": "Payment channel code." },
+        { "name": "reconData", "type": "TEXT (JSON)", "nullable": true, "description": "Reconciliation data matched from the payment gateway settlement file." },
+        { "name": "settledAt", "type": "TIMESTAMP", "nullable": true, "description": "When the order was reconciled/settled with the payment gateway." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this record was created in the middleware." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When this record was last updated." },
+        { "name": "deletedAt", "type": "TIMESTAMP", "nullable": true, "description": "Soft delete timestamp. NULL = active record." }
+      ],
+      "relationships": [
+        { "type": "belongsTo", "table": "services", "foreignKey": "serviceId" },
+        { "type": "belongsTo", "table": "clients", "foreignKey": "clientId" },
+        { "type": "hasMany", "table": "pg_responses", "foreignKey": "orderId" },
+        { "type": "hasMany", "table": "notif_logs", "foreignKey": "orderId" }
+      ],
+      "usageNotes": "Join with pg_responses to see the full payment event trail. Join with services → payment_gateways / payment_types / payment_providers for normalised gateway info. The denormalised columns pgName, paymentType, paymentProvider are faster for simple lookups."
+    },
+    {
+      "name": "pg_responses",
+      "description": "Audit log of every event/callback received from payment gateways for an order. Each row is one webhook or API response event. Multiple rows per order are normal — they represent the full event trail (e.g. VA created, VA paid, confirmation sent).",
+      "softDelete": true,
+      "columns": [
+        { "name": "id", "type": "UUID", "nullable": false, "description": "Primary key" },
+        { "name": "orderId", "type": "UUID", "nullable": true, "description": "FK → orders.id. Which order this event belongs to." },
+        { "name": "responseCode", "type": "VARCHAR", "nullable": true, "description": "Event type code. Examples: 'CCAuth' (credit card auth), 'CCToken' (card tokenisation), 'VAPaid' (VA payment received), 'QRPaid' (QR payment received), 'VACreated' (VA number assigned), 'ROWebhook' (recurring order webhook)." },
+        { "name": "responseData", "type": "TEXT (JSON)", "nullable": true, "description": "Full JSON payload from the payment gateway for this event. Contains raw gateway response including transaction IDs, bank references, amounts, timestamps, and error codes." },
+        { "name": "ordercreatedat", "type": "TIMESTAMP", "nullable": true, "description": "Partition/range key — timestamp of the parent order's creation. Used for time-range partitioning." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this event was recorded." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When this record was last updated." },
+        { "name": "deletedAt", "type": "TIMESTAMP", "nullable": true, "description": "Soft delete timestamp." }
+      ],
+      "relationships": [
+        { "type": "belongsTo", "table": "orders", "foreignKey": "orderId" }
+      ],
+      "usageNotes": "To investigate what happened to an order, query WHERE \"orderId\" = '<uuid>' ORDER BY \"createdAt\" ASC. The responseCode identifies the event type; responseData has the raw gateway payload. Multiple VAPaid entries would indicate duplicate payment callbacks."
+    },
+    {
+      "name": "services",
+      "description": "Configuration table linking a payment gateway, payment type, and payment provider into a single named service. An order is assigned one service. Fee calculation rules are stored here.",
+      "softDelete": true,
+      "columns": [
+        { "name": "id", "type": "UUID", "nullable": false, "description": "Primary key" },
+        { "name": "name", "type": "VARCHAR", "nullable": true, "description": "Human-readable service name (e.g. 'Xendit BCA Virtual Account')." },
+        { "name": "paymentGatewayId", "type": "UUID", "nullable": true, "description": "FK → payment_gateways.id" },
+        { "name": "paymentTypeId", "type": "UUID", "nullable": true, "description": "FK → payment_types.id" },
+        { "name": "paymentProviderId", "type": "UUID", "nullable": true, "description": "FK → payment_providers.id" },
+        { "name": "serviceStatus", "type": "ENUM", "nullable": true, "description": "Status: 'production' (live), 'development' (testing), 'disable' (turned off)." },
+        { "name": "feeType", "type": "ENUM", "nullable": true, "description": "'inclusive' = fee is included in amount; 'exclusive' = fee is added on top." },
+        { "name": "feeCalculation", "type": "JSON", "nullable": true, "description": "Fee rules as JSON: {\"percentage\": 0.7, \"fixed\": 4000} means 0.7% + Rp 4,000 fixed." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this service was created." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When this service was last updated." },
+        { "name": "deletedAt", "type": "TIMESTAMP", "nullable": true, "description": "Soft delete timestamp." }
+      ],
+      "relationships": [
+        { "type": "belongsTo", "table": "payment_gateways", "foreignKey": "paymentGatewayId" },
+        { "type": "belongsTo", "table": "payment_types", "foreignKey": "paymentTypeId" },
+        { "type": "belongsTo", "table": "payment_providers", "foreignKey": "paymentProviderId" },
+        { "type": "hasMany", "table": "orders", "foreignKey": "serviceId" }
+      ]
+    },
+    {
+      "name": "payment_gateways",
+      "description": "Registered payment gateway providers (e.g. Xendit, DOKU, Finnet). Each has a weight for load balancing — higher weight = more traffic routed to it.",
+      "softDelete": true,
+      "columns": [
+        { "name": "id", "type": "UUID", "nullable": false, "description": "Primary key" },
+        { "name": "pgName", "type": "VARCHAR", "nullable": false, "description": "Gateway name (e.g. 'Xendit', 'DOKU', 'Finnet'). Unique." },
+        { "name": "credential", "type": "TEXT (encrypted)", "nullable": true, "description": "AES-encrypted API credentials. Do not expose in query results." },
+        { "name": "status", "type": "ENUM", "nullable": true, "description": "'production' (live), 'development' (test), 'disable' (inactive)." },
+        { "name": "weight", "type": "INTEGER", "nullable": true, "description": "Load balancing weight. Higher = more orders routed here. Used to split traffic between gateways." },
+        { "name": "percentageRange", "type": "VARCHAR", "nullable": true, "description": "Calculated percentage range for weighted routing (e.g. '0-70' means handles 70% of traffic)." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this gateway was registered." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When last updated." },
+        { "name": "deletedAt", "type": "TIMESTAMP", "nullable": true, "description": "Soft delete timestamp." }
+      ],
+      "relationships": [
+        { "type": "hasMany", "table": "services", "foreignKey": "paymentGatewayId" }
+      ]
+    },
+    {
+      "name": "payment_types",
+      "description": "Types of payment methods supported (e.g. Virtual Account, Credit Card, QR Code). Names stored in three languages.",
+      "softDelete": true,
+      "columns": [
+        { "name": "id", "type": "UUID", "nullable": false, "description": "Primary key" },
+        { "name": "paymentTypeName", "type": "VARCHAR", "nullable": false, "description": "English name (e.g. 'Virtual Account', 'Credit Card', 'QR Code'). Unique." },
+        { "name": "paymentTypeNameId", "type": "VARCHAR", "nullable": false, "description": "Indonesian name." },
+        { "name": "paymentTypeNameCn", "type": "VARCHAR", "nullable": false, "description": "Chinese (Simplified) name." },
+        { "name": "status", "type": "ENUM", "nullable": true, "description": "'active' or 'disable'." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this type was created." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When last updated." },
+        { "name": "deletedAt", "type": "TIMESTAMP", "nullable": true, "description": "Soft delete timestamp." }
+      ],
+      "relationships": [
+        { "type": "hasMany", "table": "services", "foreignKey": "paymentTypeId" }
+      ]
+    },
+    {
+      "name": "payment_providers",
+      "description": "Banks and e-wallets available as payment channels (e.g. BCA, BRI, BNI, OVO, DANA, LinkAja). Each provider belongs to one or more payment types via services.",
+      "softDelete": true,
+      "columns": [
+        { "name": "id", "type": "UUID", "nullable": false, "description": "Primary key" },
+        { "name": "paymentProviderName", "type": "VARCHAR", "nullable": false, "description": "Provider name (e.g. 'BCA', 'BRI', 'BNI', 'OVO', 'DANA'). Unique." },
+        { "name": "logo", "type": "VARCHAR", "nullable": true, "description": "Logo image filename or URL." },
+        { "name": "description", "type": "TEXT", "nullable": true, "description": "Provider description." },
+        { "name": "status", "type": "ENUM", "nullable": true, "description": "'active' or 'disable'." },
+        { "name": "additionalData", "type": "JSON", "nullable": true, "description": "Provider-specific configuration data." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this provider was registered." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When last updated." },
+        { "name": "deletedAt", "type": "TIMESTAMP", "nullable": true, "description": "Soft delete timestamp." }
+      ],
+      "relationships": [
+        { "type": "hasMany", "table": "services", "foreignKey": "paymentProviderId" }
+      ]
+    },
+    {
+      "name": "notif_logs",
+      "description": "Log of webhook notifications sent from pg-middleware to the ticketing system after a payment event. Each row represents one delivery attempt. Used to check if the ticketing system was properly notified of a payment.",
+      "softDelete": true,
+      "columns": [
+        { "name": "id", "type": "UUID", "nullable": false, "description": "Primary key" },
+        { "name": "orderId", "type": "UUID", "nullable": true, "description": "FK → orders.id. Which order this notification is for." },
+        { "name": "payload", "type": "TEXT (JSON)", "nullable": true, "description": "The JSON payload that was sent to the ticketing system's webhook URL." },
+        { "name": "response", "type": "TEXT", "nullable": true, "description": "The HTTP response received from the ticketing system. A non-2xx response or empty means delivery failed." },
+        { "name": "initAt", "type": "TIMESTAMP", "nullable": true, "description": "When the notification was sent." },
+        { "name": "responseAt", "type": "TIMESTAMP", "nullable": true, "description": "When a response was received. NULL may indicate a timeout or failure." },
+        { "name": "ordercreatedat", "type": "TIMESTAMP", "nullable": true, "description": "Partition key — the parent order's creation time." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this log entry was created." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When last updated." },
+        { "name": "deletedAt", "type": "TIMESTAMP", "nullable": true, "description": "Soft delete timestamp." }
+      ],
+      "relationships": [
+        { "type": "belongsTo", "table": "orders", "foreignKey": "orderId" }
+      ],
+      "usageNotes": "To check if a payment notification was delivered: query WHERE \"orderId\" = '<uuid>' and inspect the response column. A NULL response or HTTP error indicates the ticketing system was not notified."
+    },
+    {
+      "name": "api_logs",
+      "description": "Raw API access log imported from the nginx access log. Each row is one HTTP request to the middleware API. Used for performance monitoring and debugging individual requests.",
+      "softDelete": false,
+      "columns": [
+        { "name": "id", "type": "INTEGER", "nullable": false, "description": "Auto-increment primary key." },
+        { "name": "url", "type": "VARCHAR", "nullable": true, "description": "Request path (e.g. '/api/v1/payment/check-billing'). Used to filter by endpoint." },
+        { "name": "method", "type": "VARCHAR", "nullable": true, "description": "HTTP method (GET, POST)." },
+        { "name": "responseCode", "type": "VARCHAR", "nullable": true, "description": "HTTP response status code (e.g. '200', '400', '500')." },
+        { "name": "responseTime", "type": "FLOAT", "nullable": true, "description": "Response time in milliseconds. Use for performance analysis." },
+        { "name": "accessDate", "type": "TIMESTAMP", "nullable": true, "description": "When this request was made. Use for time-range filtering." },
+        { "name": "importDate", "type": "TIMESTAMP", "nullable": true, "description": "When this log entry was imported from nginx into the database." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "Record creation timestamp." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "Record update timestamp." }
+      ],
+      "usageNotes": "This table can be very large. Always filter by accessDate range. To find performance issues, query AVG(\"responseTime\") grouped by url and date. URL patterns for payment gateways: '/webhook/v1/xvapaid' (Xendit VA), '/webhook/v1/xqrpaid' (Xendit QR), '/webhook/v1/finnet' (Finnet), '/webhook/v1/dvapaid' (DOKU VA), '/webhook/v1/dqrpaid' (DOKU QR)."
+    },
+    {
+      "name": "api_log_calcs",
+      "description": "Pre-aggregated daily API statistics per endpoint. Computed from api_logs by pgmd-processor. Use this for gateway performance analysis instead of querying api_logs directly — it is much faster.",
+      "softDelete": false,
+      "columns": [
+        { "name": "id", "type": "INTEGER", "nullable": false, "description": "Auto-increment primary key." },
+        { "name": "logDate", "type": "DATE", "nullable": true, "description": "The date these statistics cover (YYYY-MM-DD)." },
+        { "name": "calcDate", "type": "TIMESTAMP", "nullable": true, "description": "When these statistics were calculated." },
+        { "name": "url", "type": "VARCHAR", "nullable": true, "description": "API endpoint path these stats are for." },
+        { "name": "apiCountDaily", "type": "INTEGER", "nullable": true, "description": "Total number of requests to this endpoint on logDate." },
+        { "name": "apiCountHoursDaily", "type": "TEXT (JSON)", "nullable": true, "description": "JSON array of hourly call counts [0..23]. Index = hour of day." },
+        { "name": "apiResTime", "type": "TEXT (JSON)", "nullable": true, "description": "JSON object with response time stats: {\"min\": x, \"avg\": x, \"max\": x} in milliseconds." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "Record creation timestamp." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "Record update timestamp." }
+      ],
+      "usageNotes": "Preferred table for gateway performance queries. Filter by url to target specific endpoints/gateways, then use logDate range. Cast apiResTime to JSON and extract avg/min/max fields for response time analysis."
+    },
+    {
+      "name": "clients",
+      "description": "Merchant accounts. Currently one active client (KCIC ticketing system). Stores API credentials and webhook configuration.",
+      "softDelete": true,
+      "columns": [
+        { "name": "id", "type": "UUID", "nullable": false, "description": "Primary key" },
+        { "name": "clientName", "type": "VARCHAR", "nullable": false, "description": "Merchant/client name. Unique." },
+        { "name": "webhookUrl", "type": "TEXT", "nullable": true, "description": "URL where payment notifications are sent after successful payment." },
+        { "name": "clientId", "type": "VARCHAR", "nullable": true, "description": "API client ID for authentication." },
+        { "name": "secretId", "type": "VARCHAR", "nullable": true, "description": "API secret for authentication." },
+        { "name": "status", "type": "ENUM", "nullable": true, "description": "'active' or 'disable'." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this client was registered." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When last updated." },
+        { "name": "deletedAt", "type": "TIMESTAMP", "nullable": true, "description": "Soft delete timestamp." }
+      ]
+    },
+    {
+      "name": "users",
+      "description": "Backoffice user accounts for the admin panel. Not related to end-customer/passenger accounts.",
+      "softDelete": true,
+      "columns": [
+        { "name": "id", "type": "UUID", "nullable": false, "description": "Primary key" },
+        { "name": "name", "type": "VARCHAR", "nullable": false, "description": "User's full name." },
+        { "name": "email", "type": "VARCHAR", "nullable": false, "description": "Login email. Unique." },
+        { "name": "phone", "type": "VARCHAR", "nullable": true, "description": "Phone number." },
+        { "name": "password", "type": "VARCHAR", "nullable": true, "description": "Bcrypt-hashed password. Never expose in query results." },
+        { "name": "lastLogin", "type": "TIMESTAMP", "nullable": true, "description": "Last login timestamp." },
+        { "name": "role", "type": "VARCHAR", "nullable": true, "description": "User role: 'ADMIN', 'TICKETING', 'TKT_MGR', 'FINANCE', 'SUPER_ADMIN'." },
+        { "name": "status", "type": "ENUM", "nullable": true, "description": "'active' or 'disable'." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this account was created." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When last updated." },
+        { "name": "deletedAt", "type": "TIMESTAMP", "nullable": true, "description": "Soft delete timestamp." }
+      ]
+    },
+    {
+      "name": "reports",
+      "description": "Generated reconciliation/settlement reports. Each row represents one report job triggered by the finance team, with the report data stored as JSON.",
+      "softDelete": false,
+      "columns": [
+        { "name": "id", "type": "UUID", "nullable": false, "description": "Primary key" },
+        { "name": "reportTitle", "type": "VARCHAR", "nullable": false, "description": "Report name/title." },
+        { "name": "reportType", "type": "VARCHAR", "nullable": false, "description": "Type of report (e.g. reconciliation, settlement, finance)." },
+        { "name": "reportPeriodStart", "type": "TIMESTAMP", "nullable": true, "description": "Start of the report period." },
+        { "name": "reportPeriodEnd", "type": "TIMESTAMP", "nullable": true, "description": "End of the report period." },
+        { "name": "reportData", "type": "JSON", "nullable": true, "description": "The report content as JSON." },
+        { "name": "status", "type": "ENUM", "nullable": false, "description": "'In Process' (generating) or 'Completed' (ready)." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this report was requested." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When last updated." }
+      ]
+    },
+    {
+      "name": "api_log_debugs",
+      "description": "Debug log of incoming API requests including their signature verification status. Used for diagnosing authentication/signature issues.",
+      "softDelete": false,
+      "columns": [
+        { "name": "id", "type": "INTEGER", "nullable": false, "description": "Auto-increment primary key." },
+        { "name": "endpoint", "type": "VARCHAR", "nullable": true, "description": "API endpoint that was called." },
+        { "name": "payload", "type": "TEXT (JSON)", "nullable": true, "description": "Request payload received." },
+        { "name": "signature", "type": "TEXT", "nullable": true, "description": "Signature header provided by the caller." },
+        { "name": "rawPayload", "type": "TEXT", "nullable": true, "description": "Raw request body before parsing." },
+        { "name": "signatureStatus", "type": "ENUM", "nullable": true, "description": "'accepted' or 'rejected'. Use to find requests that failed signature validation." },
+        { "name": "createdAt", "type": "TIMESTAMP", "nullable": false, "description": "When this request was logged." },
+        { "name": "updatedAt", "type": "TIMESTAMP", "nullable": false, "description": "When last updated." }
+      ]
+    }
+  ],
+  "commonQueryPatterns": {
+    "lookUpOrder": "SELECT o.*, s.name AS serviceName, pg.\"pgName\" AS gatewayName, pt.\"paymentTypeName\", pp.\"paymentProviderName\" FROM orders o LEFT JOIN services s ON o.\"serviceId\" = s.id LEFT JOIN payment_gateways pg ON s.\"paymentGatewayId\" = pg.id LEFT JOIN payment_types pt ON s.\"paymentTypeId\" = pt.id LEFT JOIN payment_providers pp ON s.\"paymentProviderId\" = pp.id WHERE o.\"invoiceNumber\" = $1 AND o.\"deletedAt\" IS NULL LIMIT 1",
+    "orderEventTrail": "SELECT \"responseCode\", \"responseData\", \"createdAt\" FROM pg_responses WHERE \"orderId\" = $1 AND \"deletedAt\" IS NULL ORDER BY \"createdAt\" ASC",
+    "orderNotifications": "SELECT \"payload\", \"response\", \"initAt\", \"responseAt\" FROM notif_logs WHERE \"orderId\" = $1 AND \"deletedAt\" IS NULL ORDER BY \"createdAt\" ASC",
+    "gatewayPerformance": "SELECT \"logDate\", \"url\", \"apiCountDaily\", \"apiResTime\" FROM api_log_calcs WHERE \"logDate\" BETWEEN $1 AND $2 ORDER BY \"logDate\" ASC",
+    "ordersByStatus": "SELECT status, COUNT(*) AS count FROM orders WHERE \"deletedAt\" IS NULL AND \"createdAt\" >= $1 GROUP BY status",
+    "revenueByGateway": "SELECT \"pgName\", COUNT(*) AS orderCount, SUM(amount) AS totalAmount, SUM(\"netAmount\") AS totalNet FROM orders WHERE status IN ('paid','done') AND \"deletedAt\" IS NULL AND \"paymentDate\" BETWEEN $1 AND $2 GROUP BY \"pgName\""
+  }
+}

@@ -1,0 +1,35 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+
+# Local env files — never bake secrets into the image
+.env
+.env.*
+!.env.example
+
+# Dev/test artefacts
+coverage
+.nyc_output
+
+# Logs
+*.log
+logs
+
+# Editor / OS
+.DS_Store
+.vscode
+.idea
+*.swp
+
+# Git
+.git
+.gitignore
+
+# Docker itself
+Dockerfile
+.dockerignore
+
+# pnpm local store
+.pnpm-store
