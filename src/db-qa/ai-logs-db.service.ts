@@ -17,6 +17,7 @@ export class AiLogsDbService {
    */
   async logUsage(params: {
     userId: number | null;
+    llmProviderId?: number | null;
     question: string;
     sql?: string | null;
     rowCount?: number | null;
@@ -28,6 +29,7 @@ export class AiLogsDbService {
     try {
       await this.repo.save({
         userId: params.userId,
+        llmProviderId: params.llmProviderId ?? null,
         question: params.question.slice(0, 2000),
         sqlText: params.sql?.slice(0, 65535) ?? null,
         rowCount: params.rowCount ?? null,

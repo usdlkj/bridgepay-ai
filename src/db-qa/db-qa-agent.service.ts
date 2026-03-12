@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { SchemaService } from './schema.service';
 import { QueryExecutorService } from './query-executor.service';
 import { LlmResolverService } from '../llm/llm-resolver.service';
+import { LlmConfigDbService } from '../llm/llm-config-db.service';
 import { AskCacheService } from './ask-cache.service';
 import { ConversationSessionService } from './conversation-session.service';
 import { AiLogsDbService } from './ai-logs-db.service';
@@ -24,6 +25,7 @@ export class DbQaAgentService {
     private readonly schemaService: SchemaService,
     private readonly queryExecutor: QueryExecutorService,
     private readonly llmResolver: LlmResolverService,
+    private readonly llmConfigDb: LlmConfigDbService,
     private readonly askCache: AskCacheService,
     private readonly conversationSession: ConversationSessionService,
     private readonly aiLogsDb: AiLogsDbService,
@@ -33,6 +35,7 @@ export class DbQaAgentService {
     userId: number | null | undefined,
     question: string,
     params: {
+      llmProviderId?: number | null;
       sql?: string | null;
       rowCount?: number | null;
       latencyMs?: number | null;
@@ -58,6 +61,18 @@ export class DbQaAgentService {
     userId?: number | null,
   ): Promise<AskResult> {
     const startMs = Date.now();
+
+    const sqlConfig = this.llmResolver.getSqlConfig();
+    // Resolve provider ID once — used in all logUsageAsync calls for this request.
+    // Failures here are non-fatal; logging will simply record null.
+    let llmProviderId: number | null = null;
+    try {
+      const providerCfg = await this.llmConfigDb.getConfig(sqlConfig.provider);
+      llmProviderId = providerCfg.id;
+    } catch {
+      // provider not yet seeded — continue without ID
+    }
+
     const cached = this.askCache.isEnabled()
       ? await this.askCache.get(question)
       : null;
@@ -68,6 +83,7 @@ export class DbQaAgentService {
         ...(includeSql && cached.sql && { sql: cached.sql }),
       };
       this.logUsageAsync(userId, question, {
+        llmProviderId,
         rowCount: cached.rowCount,
         latencyMs: Date.now() - startMs,
         status: 'cache_hit',
@@ -83,8 +99,6 @@ export class DbQaAgentService {
       question,
       schemaPruning,
     );
-    const sqlConfig = this.llmResolver.getSqlConfig();
-
     let userContent = question;
     if (sessionId) {
       const turns = await this.conversationSession.getTurns(sessionId);
@@ -126,6 +140,7 @@ export class DbQaAgentService {
     if (!rawSql) {
       this.logger.warn(`LLM returned empty SQL for question: ${question}`);
       this.logUsageAsync(userId, question, {
+        llmProviderId,
         latencyMs: Date.now() - startMs,
         tokensIn,
         tokensOut,
@@ -145,6 +160,7 @@ export class DbQaAgentService {
         `SQL validation failed: ${validation.error}. SQL: ${rawSql}`,
       );
       this.logUsageAsync(userId, question, {
+        llmProviderId,
         sql: rawSql,
         latencyMs: Date.now() - startMs,
         tokensIn,
@@ -168,6 +184,7 @@ export class DbQaAgentService {
       const msg = err instanceof Error ? err.message : 'Query execution failed';
       this.logger.warn(`Query execution failed: ${msg}. SQL: ${rawSql}`);
       this.logUsageAsync(userId, question, {
+        llmProviderId,
         sql: rawSql,
         latencyMs: Date.now() - startMs,
         tokensIn,
@@ -208,6 +225,7 @@ export class DbQaAgentService {
     };
 
     this.logUsageAsync(userId, question, {
+      llmProviderId,
       sql: rawSql,
       rowCount,
       latencyMs: Date.now() - startMs,

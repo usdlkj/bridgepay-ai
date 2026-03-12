@@ -9,6 +9,7 @@ import { LlmApiKey } from './entities/llm-api-key.entity';
 import { LlmCryptoService } from './llm-crypto.service';
 
 export interface LlmProviderConfig {
+  id: number;
   apiKey: string | null;
   baseUrl: string | null;
 }
@@ -61,6 +62,7 @@ export class LlmConfigDbService implements OnModuleDestroy {
     }
 
     const config: LlmProviderConfig = {
+      id: row.id,
       apiKey: row.apiKey ? this.crypto.decrypt(row.apiKey) : null,
       baseUrl: row.baseUrl ?? null,
     };

@@ -13,6 +13,9 @@ export class AiUsageLog {
   @Column({ name: 'user_id', type: 'int', nullable: true })
   userId: number | null;
 
+  @Column({ name: 'llm_provider_id', type: 'integer', nullable: true })
+  llmProviderId: number | null;
+
   @Column({ type: 'varchar', length: 2000 })
   question: string;
 
