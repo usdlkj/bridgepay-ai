@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
 import type {
   LlmProvider,
@@ -7,23 +6,29 @@ import type {
   LlmCompletionOptions,
   LlmCompletionResult,
 } from '../interfaces/llm-provider.interface';
+import { LlmConfigDbService } from '../llm-config-db.service';
 
 @Injectable()
 export class AnthropicAdapter implements LlmProvider {
   readonly providerCode = 'anthropic';
-  private client: Anthropic;
+  private client: Anthropic | null = null;
+  private cachedKey: string | null = null;
 
-  constructor(private readonly config: ConfigService) {
-    this.client = new Anthropic({
-      apiKey: this.config.get<string>('ANTHROPIC_KEY'),
-    });
-  }
+  constructor(private readonly configDb: LlmConfigDbService) {}
 
   async complete(
     messages: LlmMessage[],
     model: string,
     options?: LlmCompletionOptions,
   ): Promise<LlmCompletionResult> {
+    const { apiKey } = await this.configDb.getConfig('anthropic');
+    if (!apiKey) throw new Error('Anthropic API key not configured in llm_api_keys');
+
+    if (apiKey !== this.cachedKey) {
+      this.client = new Anthropic({ apiKey });
+      this.cachedKey = apiKey;
+    }
+
     const systemContent = options?.systemPrompt ?? '';
     const anthropicMessages = messages
       .filter((m) => m.role !== 'system')
@@ -32,7 +37,7 @@ export class AnthropicAdapter implements LlmProvider {
         content: m.content,
       }));
 
-    const response = await this.client.messages.create({
+    const response = await this.client!.messages.create({
       model,
       max_tokens: options?.maxTokens ?? 1024,
       system: systemContent,

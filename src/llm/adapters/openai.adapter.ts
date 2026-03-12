@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import type {
   LlmProvider,
@@ -7,40 +6,39 @@ import type {
   LlmCompletionOptions,
   LlmCompletionResult,
 } from '../interfaces/llm-provider.interface';
+import { LlmConfigDbService } from '../llm-config-db.service';
 
 @Injectable()
 export class OpenaiAdapter implements LlmProvider {
   readonly providerCode = 'openai';
-  private client: OpenAI;
+  private client: OpenAI | null = null;
+  private cachedKey: string | null = null;
 
-  constructor(private readonly config: ConfigService) {
-    this.client = new OpenAI({
-      apiKey: this.config.get<string>('OPENAI_API_KEY'),
-    });
-  }
+  constructor(private readonly configDb: LlmConfigDbService) {}
 
   async complete(
     messages: LlmMessage[],
     model: string,
     options?: LlmCompletionOptions,
   ): Promise<LlmCompletionResult> {
+    const { apiKey } = await this.configDb.getConfig('openai');
+    if (!apiKey) throw new Error('OpenAI API key not configured in llm_api_keys');
+
+    if (apiKey !== this.cachedKey) {
+      this.client = new OpenAI({ apiKey });
+      this.cachedKey = apiKey;
+    }
+
     const openaiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
 
     if (options?.systemPrompt) {
-      openaiMessages.push({
-        role: 'system',
-        content: options.systemPrompt,
-      });
+      openaiMessages.push({ role: 'system', content: options.systemPrompt });
     }
-
     for (const m of messages) {
-      openaiMessages.push({
-        role: m.role,
-        content: m.content,
-      });
+      openaiMessages.push({ role: m.role, content: m.content });
     }
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.client!.chat.completions.create({
       model,
       max_tokens: options?.maxTokens ?? 1024,
       messages: openaiMessages,

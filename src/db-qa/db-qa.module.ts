@@ -16,28 +16,6 @@ import { AiUsageLog } from './entities/ai-usage-log.entity';
 @Module({
   imports: [
     LlmModule,
-    TypeOrmModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        type: 'postgres',
-        host:
-          config.get<string>('DB_AI_HOST') ??
-          config.get<string>('DB_HOST') ??
-          'localhost',
-        port: parseInt(
-          config.get<string>('DB_AI_PORT') ??
-            config.get<string>('DB_PORT') ??
-            '5432',
-          10,
-        ),
-        username: config.get<string>('DB_AI_USERNAME'),
-        password: config.get<string>('DB_AI_PASSWORD'),
-        database: config.get<string>('DB_AI_DATABASE'),
-        entities: [AiUsageLog],
-        synchronize: true,
-      }),
-    }),
     TypeOrmModule.forFeature([AiUsageLog]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
