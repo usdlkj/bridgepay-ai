@@ -34,6 +34,9 @@ export class AiUsageLog {
   @Column({ name: 'tokens_out', type: 'int', nullable: true })
   tokensOut: number | null;
 
+  @Column({ name: 'prompt_template_id', type: 'int', nullable: true })
+  promptTemplateId: number | null;
+
   @Column({ type: 'varchar', length: 50, default: 'success' })
   status: string;
 

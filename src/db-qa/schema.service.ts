@@ -1,7 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { StorageService } from './storage.service';
+import { SchemaDefinitionRecord } from './entities/schema-definition.entity';
 
 export interface SchemaColumn {
   name: string;
@@ -25,38 +29,85 @@ export interface SchemaDefinition {
 
 @Injectable()
 export class SchemaService {
+  private readonly logger = new Logger(SchemaService.name);
+
   private schema: SchemaDefinition | null = null;
+  private schemaLoadedAt = 0;
+  private readonly SCHEMA_TTL_MS = 10 * 60 * 1000;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    @InjectRepository(SchemaDefinitionRecord)
+    private readonly schemaRepo: Repository<SchemaDefinitionRecord>,
+    private readonly storageService: StorageService,
+  ) {}
 
-  loadSchema(): SchemaDefinition {
-    if (this.schema) return this.schema;
-
-    const schemaPath =
-      this.config.get<string>('SCHEMA_PATH') ??
-      join(process.cwd(), 'schema', 'SCHEMA_V1.json');
-
-    const resolved = schemaPath.startsWith('/')
-      ? schemaPath
-      : join(process.cwd(), schemaPath);
-
-    const raw = readFileSync(resolved, 'utf-8');
-    this.schema = JSON.parse(raw) as SchemaDefinition;
-    return this.schema;
+  invalidateCache(): void {
+    this.schema = null;
+    this.schemaLoadedAt = 0;
   }
 
   /**
-   * Build a schema string for the LLM system prompt.
-   * Includes table descriptions, soft-delete notes, column types, and usage notes.
+   * Load the schema definition with a 10-minute TTL cache.
+   * Resolution order:
+   *   1. DB: schema_definitions WHERE is_active = true
+   *   2. StorageService: SCHEMA_PATH env var (bind mount or S3 key)
+   *   3. Bundled fallback: schema/SCHEMA_V1.json
    */
-  getSchemaForPrompt(): string {
-    const def = this.loadSchema();
+  async loadSchema(): Promise<SchemaDefinition> {
+    const now = Date.now();
+    if (this.schema && now - this.schemaLoadedAt < this.SCHEMA_TTL_MS) {
+      return this.schema;
+    }
+
+    // 1. DB
+    try {
+      const record = await this.schemaRepo.findOne({ where: { isActive: true } });
+      if (record) {
+        this.schema = record.content as unknown as SchemaDefinition;
+        this.schemaLoadedAt = now;
+        this.logger.debug('Schema loaded from DB');
+        return this.schema;
+      }
+    } catch (err) {
+      this.logger.warn(
+        `DB schema load failed: ${err instanceof Error ? err.message : 'unknown'}`,
+      );
+    }
+
+    // 2. StorageService (bind mount or S3)
+    const schemaPath = this.config.get<string>('SCHEMA_PATH');
+    if (schemaPath) {
+      try {
+        const raw = await this.storageService.readFile(schemaPath);
+        this.schema = JSON.parse(raw) as SchemaDefinition;
+        this.schemaLoadedAt = now;
+        this.logger.debug(`Schema loaded from storage: ${schemaPath}`);
+        return this.schema;
+      } catch (err) {
+        this.logger.warn(
+          `Storage schema load failed (${schemaPath}): ${
+            err instanceof Error ? err.message : 'unknown'
+          }`,
+        );
+      }
+    }
+
+    // 3. Bundled fallback
+    const fallbackPath = join(process.cwd(), 'schema', 'SCHEMA_V1.json');
+    const raw = readFileSync(fallbackPath, 'utf-8');
+    this.schema = JSON.parse(raw) as SchemaDefinition;
+    this.schemaLoadedAt = now;
+    this.logger.debug('Schema loaded from bundled fallback');
+    return this.schema;
+  }
+
+  async getSchemaForPrompt(): Promise<string> {
+    const def = await this.loadSchema();
     const lines: string[] = [];
 
     for (const table of def.tables) {
-      const cols = table.columns
-        .map((c) => `"${c.name}" (${c.type})`)
-        .join(', ');
+      const cols = table.columns.map((c) => `"${c.name}" (${c.type})`).join(', ');
       const softDeleteNote = table.softDelete
         ? ' [soft-delete: filter WHERE "deletedAt" IS NULL]'
         : '';
@@ -71,26 +122,19 @@ export class SchemaService {
     return lines.join('\n');
   }
 
-  /**
-   * Get schema for prompt, optionally pruned by question keywords.
-   */
-  getSchemaForPromptFiltered(
+  async getSchemaForPromptFiltered(
     _version: 'v1' | 'v2',
     question: string | null | undefined,
     pruningEnabled: boolean,
-  ): string {
+  ): Promise<string> {
     if (question && pruningEnabled) {
       return this.getSchemaForPromptByQuestion(question);
     }
     return this.getSchemaForPrompt();
   }
 
-  /**
-   * Keyword-based schema pruning. Returns schema for tables relevant to the question.
-   * Falls back to full schema if no matches.
-   */
-  getSchemaForPromptByQuestion(question: string): string {
-    const def = this.loadSchema();
+  async getSchemaForPromptByQuestion(question: string): Promise<string> {
+    const def = await this.loadSchema();
     const terms = question
       .toLowerCase()
       .replace(/[^\w\s]/g, ' ')
@@ -124,9 +168,7 @@ export class SchemaService {
 
     const lines: string[] = [];
     for (const table of tablesToInclude) {
-      const cols = table.columns
-        .map((c) => `"${c.name}" (${c.type})`)
-        .join(', ');
+      const cols = table.columns.map((c) => `"${c.name}" (${c.type})`).join(', ');
       const softDeleteNote = table.softDelete
         ? ' [soft-delete: filter WHERE "deletedAt" IS NULL]'
         : '';

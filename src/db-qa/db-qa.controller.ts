@@ -17,7 +17,7 @@ export class DbQaController {
   }
 
   @Post('ask')
-  // @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard)
   async ask(@Body() dto: AskDto): Promise<AskResult> {
     return this.agent.ask(dto.question, dto.include_sql, dto.session_id, null);
   }

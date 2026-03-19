@@ -28,7 +28,6 @@
     "@nestjs/platform-express": "^11.0.1",
     "@nestjs/typeorm": "^11.0.0",
     "ioredis": "^5.10.0",
-    "mysql2": "^3.19.1",
     "nestjs-pino": "^4.6.0",
     "openai": "^6.27.0",
     "pg": "^8.20.0",
