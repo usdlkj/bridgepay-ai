@@ -8,7 +8,7 @@ on:
 
 env:
   REGISTRY: docker.kcic.co.id
-  IMAGE_NAME: pg-middleware-ai
+  IMAGE_NAME: bridgepay-ai
 
 jobs:
   # ── build & push ─────────────────────────────────────────────────────────────
