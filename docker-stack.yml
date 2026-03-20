@@ -1,0 +1,53 @@
+version: '3.8'
+
+networks:
+  kcic_net:
+    external: true
+
+services:
+  app:
+    image: docker.kcic.co.id/pg-middleware-ai:${IMAGE_TAG:-staging}
+    networks:
+      - kcic_net
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      LOG_FORMAT: json
+      LOG_LEVEL: info
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_DATABASE: ${DB_DATABASE}
+      DB_AI_USERNAME: ${DB_AI_USERNAME}
+      DB_AI_PASSWORD: ${DB_AI_PASSWORD}
+      DB_AI_DATABASE: ${DB_AI_DATABASE}
+      JWT_SECRET: ${JWT_SECRET}
+      LLM_ENCRYPTION_KEY: ${LLM_ENCRYPTION_KEY}
+      LLM_SQL_PROVIDER: ${LLM_SQL_PROVIDER:-openai}
+      LLM_SQL_MODEL: ${LLM_SQL_MODEL:-gpt-4o}
+      LLM_ANSWER_PROVIDER: ${LLM_ANSWER_PROVIDER:-openai}
+      LLM_ANSWER_MODEL: ${LLM_ANSWER_MODEL:-gpt-4o}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      SCHEMA_PATH: ${SCHEMA_PATH:-schema/SCHEMA_V1.json}
+      REDIS_URL: ${REDIS_URL:-}
+      DBQA_CACHE_TTL: ${DBQA_CACHE_TTL:-3600}
+      BYPASS_JWT_AUTH: ${BYPASS_JWT_AUTH:-false}
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        order: stop-first
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

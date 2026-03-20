@@ -34,6 +34,17 @@ export class AskCacheService implements OnModuleDestroy {
     return this.redis !== null;
   }
 
+  /** Returns null when Redis is not configured (skip), 'ok' on success, or the error message on failure. */
+  async ping(): Promise<'ok' | 'skip' | string> {
+    if (!this.redis) return 'skip';
+    try {
+      await this.redis.ping();
+      return 'ok';
+    } catch (err) {
+      return err instanceof Error ? err.message : 'unknown error';
+    }
+  }
+
   cacheKey(question: string): string {
     const normalized = question.trim().toLowerCase().replace(/\s+/g, ' ');
     const hash = createHash('sha256')

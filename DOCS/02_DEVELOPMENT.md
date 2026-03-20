@@ -5,13 +5,33 @@
 | Environment | Version | Notes |
 |---|---|---|
 | Production | — | Not yet deployed |
-| Development | `v0.1.0` | Initial working build — feature development in progress |
-
-Implementation complete — pending seed scripts run and dev verification.
+| Development | `v0.3.0` | Enhanced health endpoint implemented |
 
 ---
 
 ## Release History
+
+### v0.3.0 — Enhanced Health Endpoint
+
+**What's included:**
+
+- `GET /health` — live DB / Redis / LLM checks with `ok` / `degraded` / `error` aggregate status
+- `HTTP 503` on `error`; `HTTP 200` on `ok` or `degraded`
+- `HealthService` with parallel `Promise.all` checks
+- `AskCacheService.ping()` method
+
+### v0.2.0 — Prompt & Schema Management
+
+**What's included:**
+
+- System prompts stored in `prompt_templates` DB table — editable at runtime, no redeploy needed
+- Schema definition stored in `schema_definitions` DB table with `StorageService` abstraction (local fs / S3) and bundled file fallback
+- Admin API: prompt CRUD, version activation (rollback), usage stats, cache invalidation
+- `AdminGuard` — role-based access for `ADMIN` / `SUPER_ADMIN` tokens
+- `ai_usage_log` linked to `prompt_template_id` for per-version analytics
+- Seed scripts: `seed-prompts.js`, `seed-schema.js`
+- ENUM column values inlined into schema prompt to prevent invalid enum usage by LLM
+- Global `LlmProviderApiExceptionFilter` — maps `OpenAI.APIError` to `HTTP 502` with sanitised message
 
 ### v0.1.0 — Initial release
 
@@ -25,11 +45,107 @@ Implementation complete — pending seed scripts run and dev verification.
 - AI usage logging to `ai_usage_log`
 - JWT authentication (shared secret with pg-middleware)
 - Docker multi-stage build + GitHub Actions CI/CD pipeline
-- `GET /health` endpoint
+- `GET /health` endpoint (static response)
 
 ---
 
-## Planned: v0.2.0 — Prompt & Schema Management
+## Released: v0.3.0 — Enhanced Health Endpoint
+
+**What's included:**
+- `GET /health` replaced with live dependency checks — database (`SELECT 1`), Redis (`PING`, skipped when `REDIS_URL` unset), LLM key presence (`LlmConfigDbService.getConfig`)
+- Aggregated `status`: `ok` / `degraded` / `error` with per-check `{ status, detail? }` objects
+- `HTTP 503` returned when `status === 'error'`; all other states return `HTTP 200`
+- New `HealthService` (`src/db-qa/health.service.ts`) — all three checks run in parallel via `Promise.all`
+- `AskCacheService.ping()` added to expose the Redis health check without duplicating the client
+
+---
+
+## Development Plan — v0.3.0
+
+### Step 1 — HealthService
+
+**New file: `src/db-qa/health.service.ts`**
+
+Runs each check independently so a single failure does not block the others. Returns a typed result object.
+
+```typescript
+interface CheckResult {
+  status: 'ok' | 'error';
+  detail?: string;
+}
+
+interface HealthReport {
+  status: 'ok' | 'degraded' | 'error';
+  service: string;
+  timestamp: string;
+  checks: {
+    database: CheckResult;
+    redis: CheckResult | { status: 'skip' };
+    llm: CheckResult;
+  };
+}
+```
+
+**`checkDatabase()`**
+- Runs `SELECT 1` via TypeORM `DataSource.query()`.
+- Returns `{ status: 'ok' }` on success, `{ status: 'error', detail: err.message }` on failure.
+
+**`checkRedis()`**
+- If `REDIS_URL` env var is not set, return `{ status: 'skip' }`.
+- Otherwise call `PING` via the existing `ioredis` client (inject from `AskCacheService` or create a one-shot client).
+- Returns `{ status: 'ok' }` or `{ status: 'error', detail: err.message }`.
+
+**`checkLlm()`**
+- Calls `LlmConfigDbService.getConfig(LLM_SQL_PROVIDER)` — succeeds if at least one encrypted key row exists.
+- Returns `{ status: 'ok' }` if a config is returned, `{ status: 'error', detail: 'no active key' }` otherwise.
+
+**Status aggregation logic:**
+```
+all ok              → 'ok'
+any error           → 'error'
+some skip (Redis)   → aggregate over non-skip checks only
+```
+
+**Edit: `src/db-qa/db-qa.module.ts`**
+- Register `HealthService` as a provider.
+
+---
+
+### Step 2 — Update DbQaController
+
+**Edit: `src/db-qa/db-qa.controller.ts`**
+
+Replace the static `health()` handler with one that calls `HealthService.getReport()` and sets the HTTP status accordingly.
+
+```typescript
+@Get('health')
+async health(@Res({ passthrough: true }) res: Response) {
+  const report = await this.health.getReport();
+  if (report.status === 'error') {
+    res.status(HttpStatus.SERVICE_UNAVAILABLE);
+  }
+  return report;
+}
+```
+
+- Inject `HealthService` into the controller constructor.
+- `status: 'degraded'` and `status: 'ok'` both return `HTTP 200` — only `error` returns `503`.
+
+---
+
+### Step 3 — Dev verification checklist
+
+After all code changes, verify on the development environment:
+
+- [x] `GET /health` returns `200` with `status: 'ok'` when all deps are up
+- [x] All three check keys (`database`, `redis`, `llm`) appear in the response
+- [x] Redis check shows `{ status: 'skip' }` when `REDIS_URL` is not set
+- [ ] Simulating a DB outage (e.g. wrong `DB_HOST`) causes `503` with `status: 'error'`
+- [x] `POST /ask` is unaffected by the change
+
+---
+
+## Released: v0.2.0 — Prompt & Schema Management
 
 Full design spec: [`DOCS/features/PROMPT_SCHEMA_MANAGEMENT.md`](features/PROMPT_SCHEMA_MANAGEMENT.md)
 
@@ -353,4 +469,5 @@ pnpm run lint           # ESLint + Prettier fix
 |---|---|
 | [`01_DESIGN.md`](01_DESIGN.md) | System architecture, database schema, design decisions |
 | [`02_DEVELOPMENT.md`](02_DEVELOPMENT.md) | This file — release history, development plan, dev setup |
+| [`03_DEPLOYMENT.md`](03_DEPLOYMENT.md) | Deployment guide — test environment, CI/CD, rollback |
 | [`features/PROMPT_SCHEMA_MANAGEMENT.md`](features/PROMPT_SCHEMA_MANAGEMENT.md) | Full design spec for v0.2.0 |

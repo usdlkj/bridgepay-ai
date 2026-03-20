@@ -102,12 +102,21 @@ export class SchemaService {
     return this.schema;
   }
 
+  /** For ENUM columns, inline the allowed values so the LLM uses exact case. */
+  private formatColumn(c: SchemaColumn): string {
+    if (c.description && /^enum$/i.test(c.type.split(/[\s(]/)[0])) {
+      const values = (c.description.match(/'[^']+'/g) ?? []).join(', ');
+      return values ? `"${c.name}" (ENUM: ${values})` : `"${c.name}" (ENUM)`;
+    }
+    return `"${c.name}" (${c.type})`;
+  }
+
   async getSchemaForPrompt(): Promise<string> {
     const def = await this.loadSchema();
     const lines: string[] = [];
 
     for (const table of def.tables) {
-      const cols = table.columns.map((c) => `"${c.name}" (${c.type})`).join(', ');
+      const cols = table.columns.map((c) => this.formatColumn(c)).join(', ');
       const softDeleteNote = table.softDelete
         ? ' [soft-delete: filter WHERE "deletedAt" IS NULL]'
         : '';
@@ -168,7 +177,7 @@ export class SchemaService {
 
     const lines: string[] = [];
     for (const table of tablesToInclude) {
-      const cols = table.columns.map((c) => `"${c.name}" (${c.type})`).join(', ');
+      const cols = table.columns.map((c) => this.formatColumn(c)).join(', ');
       const softDeleteNote = table.softDelete
         ? ' [soft-delete: filter WHERE "deletedAt" IS NULL]'
         : '';

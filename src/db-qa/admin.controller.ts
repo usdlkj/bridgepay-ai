@@ -15,7 +15,10 @@ import { DataSource } from 'typeorm';
 import type { Request } from 'express';
 import { AdminGuard } from './admin.guard';
 import { PromptTemplate } from './entities/prompt-template.entity';
-import { PromptTemplateService, CreatePromptDto } from './prompt-template.service';
+import {
+  PromptTemplateService,
+  CreatePromptDto,
+} from './prompt-template.service';
 import { SchemaService } from './schema.service';
 
 interface UsageQueryParams {
@@ -53,11 +56,16 @@ export class AdminController {
   ): Promise<PromptTemplate> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
     const userId = (req as any)?.user?.data?.id as number | undefined;
-    return this.promptTemplate.createVersion({ ...body, created_by: userId ?? null });
+    return this.promptTemplate.createVersion({
+      ...body,
+      created_by: userId ?? null,
+    });
   }
 
   @Patch('prompts/:id/activate')
-  activatePrompt(@Param('id', ParseIntPipe) id: number): Promise<PromptTemplate> {
+  activatePrompt(
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<PromptTemplate> {
     return this.promptTemplate.activateVersion(id);
   }
 
@@ -100,7 +108,11 @@ export class AdminController {
     if (query.from) return new Date(query.from);
     const now = new Date();
     const days =
-      query.period === 'last_7_days' ? 7 : query.period === 'last_90_days' ? 90 : 30;
+      query.period === 'last_7_days'
+        ? 7
+        : query.period === 'last_90_days'
+          ? 90
+          : 30;
     return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
   }
 
@@ -128,15 +140,22 @@ export class AdminController {
     return rows;
   }
 
-  private async queryByStatus(from: Date, to: Date): Promise<Record<string, number>> {
-    const rows = await this.dataSource.query<{ status: string; count: string }[]>(
+  private async queryByStatus(
+    from: Date,
+    to: Date,
+  ): Promise<Record<string, number>> {
+    const rows = await this.dataSource.query<
+      { status: string; count: string }[]
+    >(
       `SELECT status, COUNT(*)::int AS count
        FROM ai_usage_log
        WHERE created_at >= $1 AND created_at <= $2
        GROUP BY status`,
       [from, to],
     );
-    return Object.fromEntries(rows.map((r) => [r.status, parseInt(r.count, 10)]));
+    return Object.fromEntries(
+      rows.map((r) => [r.status, parseInt(r.count, 10)]),
+    );
   }
 
   private async queryByPromptVersion(from: Date, to: Date): Promise<unknown[]> {

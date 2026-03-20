@@ -55,7 +55,7 @@ Every `POST /ask` call flows through ten steps in sequence:
       └─ Cache hit? → return immediately (status: cache_hit)
 
 2.  SchemaService.getSchemaForPromptFiltered(question)
-      └─ Keyword-score all 11 tables → pass top 8 to LLM
+      └─ Keyword-score all 13 tables → pass top 8 to LLM
 
 3.  ConversationSessionService.getTurns(session_id)
       └─ Prepend prior Q&A turns (up to 5) for multi-turn context
@@ -89,20 +89,29 @@ Every `POST /ask` call flows through ten steps in sequence:
 src/
 ├── main.ts                          NestJS bootstrap (port 3001, Pino logging)
 ├── app.module.ts                    Root module: ConfigModule, TypeORM, DbQaModule
-├── app.controller.ts                GET / → placeholder
+├── filters/
+│   └── llm-provider-api.filter.ts  Global exception filter — maps OpenAI.APIError → HTTP 502
 │
 ├── db-qa/
 │   ├── db-qa.module.ts
-│   ├── db-qa.controller.ts          GET /health, POST /ask
+│   ├── db-qa.controller.ts          GET /health (live checks), POST /ask
+│   ├── health.service.ts            Parallel DB / Redis / LLM dependency checks
+│   ├── admin.controller.ts          Admin endpoints (prompts, usage, cache invalidation)
 │   ├── db-qa-agent.service.ts       Main orchestrator (10-step pipeline)
-│   ├── schema.service.ts            Schema loading + keyword pruning
+│   ├── schema.service.ts            Schema loading (DB → StorageService → file) + keyword pruning
+│   ├── prompt-template.service.ts   DB-backed prompt templates with 5-min in-memory cache
+│   ├── storage.service.ts           Abstract file access: local fs or AWS S3
 │   ├── query-executor.service.ts    SQL validation + execution (pg.Pool)
 │   ├── ask-cache.service.ts         Redis-backed question/answer cache
 │   ├── conversation-session.service.ts  Multi-turn session state
 │   ├── ai-logs-db.service.ts        Async usage logging to DB
-│   ├── jwt-auth.guard.ts            JWT guard (currently disabled)
+│   ├── jwt-auth.guard.ts            JWT guard (shared secret with pg-middleware)
+│   ├── admin.guard.ts               Role guard — ADMIN / SUPER_ADMIN only
 │   ├── dto/ask.dto.ts               AskDto + AskResult types
-│   └── entities/ai-usage-log.entity.ts  TypeORM entity
+│   └── entities/
+│       ├── ai-usage-log.entity.ts   TypeORM entity
+│       ├── prompt-template.entity.ts TypeORM entity
+│       └── schema-definition.entity.ts TypeORM entity
 │
 └── llm/
     ├── llm.module.ts
@@ -112,7 +121,7 @@ src/
     ├── adapters/
     │   ├── anthropic.adapter.ts     Claude via @anthropic-ai/sdk
     │   ├── openai.adapter.ts        GPT via openai SDK
-    │   ├── qwen.adapter.ts          Alibaba Qwen (OpenAI-compatible)
+    │   ├── qwen.adapter.ts          Alibaba Qwen (OpenAI-compatible) with regional retry
     │   └── ollama.adapter.ts        Local Ollama via plain fetch
     ├── interfaces/llm-provider.interface.ts  Common LlmProvider contract
     └── entities/llm-api-key.entity.ts        TypeORM entity
@@ -150,9 +159,14 @@ src/
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `GET` | `/` | none | Placeholder health-check |
-| `GET` | `/health` | none | Returns service status and timestamp |
-| `POST` | `/ask` | JWT Bearer *(currently disabled)* | Natural language → SQL → answer |
+| `GET` | `/health` | none | Live dependency checks (DB, Redis, LLM key); `200 ok/degraded`, `503 error` |
+| `POST` | `/ask` | JWT Bearer | Natural language → SQL → answer |
+| `GET` | `/admin/prompts` | AdminGuard | List all prompt template versions grouped by key |
+| `GET` | `/admin/prompts/:key` | AdminGuard | Get all versions for a specific prompt key |
+| `POST` | `/admin/prompts` | AdminGuard | Create a new prompt version (auto-activates, deactivates previous) |
+| `PATCH` | `/admin/prompts/:id/activate` | AdminGuard | Activate a specific version (rollback mechanism) |
+| `GET` | `/admin/usage` | AdminGuard | AI usage statistics by provider, status, and prompt version |
+| `POST` | `/admin/cache/invalidate` | AdminGuard | Force-clear in-memory prompt and schema caches |
 
 ### POST /ask
 
@@ -212,7 +226,7 @@ Audit trail of every `/ask` call for observability and cost analysis.
 
 ### 7.2 Read-only target: pg-middleware tables
 
-The service queries 11 existing tables in the pg-middleware database. It never writes to them. The schema knowledge base is encoded in `schema/SCHEMA_V1.json` with column descriptions, relationships, and common query patterns.
+The service queries 13 existing tables in the pg-middleware database. It never writes to them. The schema knowledge base is stored in the `schema_definitions` DB table (with `schema/SCHEMA_V1.json` as a file-based fallback), and is loaded at request time via `SchemaService` → `StorageService`.
 
 | Table | Description |
 |---|---|
@@ -250,7 +264,7 @@ Three independent layers prevent write operations:
 3. **Read-only DB role** — the `pg.Pool` connects as a PostgreSQL user with no write privileges.
 
 ### 8.5 Keyword-Based Schema Pruning
-Sending the full 11-table schema in every prompt is expensive and noisy. `SchemaService` tokenises the question and scores each table using keyword overlap, passing only the top 8 most relevant tables to the LLM. This reduces prompt size, cost, and hallucination risk. If no matches are found, the full schema is used as a fallback.
+Sending the full 13-table schema in every prompt is expensive and noisy. `SchemaService` tokenises the question and scores each table using keyword overlap, passing only the top 8 most relevant tables to the LLM. This reduces prompt size, cost, and hallucination risk. If no matches are found, the full schema is used as a fallback.
 
 ### 8.6 Graceful Redis Degradation
 Both caching (`AskCacheService`) and session memory (`ConversationSessionService`) check for `REDIS_URL` at startup. If Redis is not available, caching is silently disabled and sessions fall back to an in-process `Map`. The service is fully functional without Redis.
@@ -306,5 +320,5 @@ The service runs as a Docker container alongside pg-middleware on AWS EC2.
 | ~~JWT guard is disabled~~ | Fixed — `@UseGuards(JwtAuthGuard)` is now active on `POST /ask`. |
 | ~~`mysql2` in dependencies~~ | Fixed — removed from `package.json`. |
 | ~~`dist/` committed to git~~ | Not an issue — `dist/` was never tracked; `.gitignore` already excludes it. |
-| System prompts hardcoded | SQL generation and answer synthesis prompts are strings in `db-qa-agent.service.ts`. Any change requires a code edit and redeploy. **Planned:** move to `prompt_templates` DB table. See [PROMPT_SCHEMA_MANAGEMENT.md](features/PROMPT_SCHEMA_MANAGEMENT.md). |
-| Schema definition is a static file | `schema/SCHEMA_V1.json` must be updated in the repo and redeployed when pg-middleware schema changes. **Planned:** DB-backed `schema_definitions` table with file fallback. See [PROMPT_SCHEMA_MANAGEMENT.md](features/PROMPT_SCHEMA_MANAGEMENT.md). |
+| ~~System prompts hardcoded~~ | Implemented — prompts are stored in the `prompt_templates` DB table and loaded by `PromptTemplateService` (5-min cache). Full version history and rollback via admin API. See [PROMPT_SCHEMA_MANAGEMENT.md](features/PROMPT_SCHEMA_MANAGEMENT.md). |
+| ~~Schema definition is a static file~~ | Implemented — schema is stored in the `schema_definitions` DB table and fetched via `StorageService` (local fs or S3), with `schema/SCHEMA_V1.json` as a file-based fallback. See [PROMPT_SCHEMA_MANAGEMENT.md](features/PROMPT_SCHEMA_MANAGEMENT.md). |

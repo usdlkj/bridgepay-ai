@@ -15,6 +15,7 @@ import { JwtAuthGuard } from './jwt-auth.guard';
 import { AdminGuard } from './admin.guard';
 import { PromptTemplateService } from './prompt-template.service';
 import { StorageService } from './storage.service';
+import { HealthService } from './health.service';
 import { AiUsageLog } from './entities/ai-usage-log.entity';
 import { PromptTemplate } from './entities/prompt-template.entity';
 import { SchemaDefinitionRecord } from './entities/schema-definition.entity';
@@ -44,6 +45,7 @@ import { SchemaDefinitionRecord } from './entities/schema-definition.entity';
     AdminGuard,
     PromptTemplateService,
     StorageService,
+    HealthService,
   ],
 })
 export class DbQaModule {}

@@ -1,19 +1,34 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpStatus,
+  Post,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
+import type { Response } from 'express';
 import { DbQaAgentService } from './db-qa-agent.service';
+import { HealthService, HealthReport } from './health.service';
 import { AskDto, AskResult } from './dto/ask.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
 
 @Controller()
 export class DbQaController {
-  constructor(private readonly agent: DbQaAgentService) {}
+  constructor(
+    private readonly agent: DbQaAgentService,
+    private readonly health: HealthService,
+  ) {}
 
   @Get('health')
-  health() {
-    return {
-      status: 'ok',
-      service: 'pg-middleware-ai',
-      timestamp: new Date().toISOString(),
-    };
+  async healthCheck(
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<HealthReport> {
+    const report = await this.health.getReport();
+    if (report.status === 'error') {
+      res.status(HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    return report;
   }
 
   @Post('ask')
