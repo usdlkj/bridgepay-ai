@@ -11,12 +11,9 @@ env:
   IMAGE_NAME: bridgepay-ai
 
 jobs:
-  # ── build & push ─────────────────────────────────────────────────────────────
   build:
     name: Build & push image
     runs-on: ubuntu-latest
-    outputs:
-      sha_tag: ${{ steps.meta.outputs.sha_tag }}
 
     steps:
       - name: Checkout
@@ -34,11 +31,12 @@ jobs:
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
       - name: Compute image tags
+        if: github.event_name == 'push'
         id: meta
         run: |
           SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          echo "sha_tag=${SHA}" >> "$GITHUB_OUTPUT"
           echo "IMAGE_BASE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> "$GITHUB_ENV"
+          echo "sha_tag=${SHA}" >> "$GITHUB_OUTPUT"
 
       # PRs: build only — no push. Catches Dockerfile errors before merge.
       - name: Build (PR – verify only)
@@ -50,7 +48,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # main: build and push with SHA tag + :staging (overwritten per deploy)
+      # main: build and push with SHA tag + :staging
       - name: Build and push (main)
         if: github.event_name == 'push'
         uses: docker/build-push-action@v6
@@ -62,97 +60,3 @@ jobs:
             ${{ env.IMAGE_BASE }}:staging
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  # ── deploy staging (VPS) ─────────────────────────────────────────────────────
-  deploy-staging:
-    name: Deploy → staging (VPS)
-    needs: build
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    environment: staging
-
-    steps:
-      - name: SSH deploy to staging VPS
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.STAGING_SSH_HOST }}
-          username: ${{ secrets.STAGING_SSH_USER }}
-          key: ${{ secrets.STAGING_SSH_KEY }}
-          script: |
-            set -e
-            IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.sha_tag }}"
-
-            echo "${{ secrets.REGISTRY_PASSWORD }}" \
-              | docker login ${{ env.REGISTRY }} \
-                  -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
-
-            docker pull "${IMAGE}"
-
-            docker stop pg-middleware-ai || true
-            docker rm   pg-middleware-ai || true
-
-            docker run -d \
-              --name pg-middleware-ai \
-              --restart unless-stopped \
-              --env-file /opt/pg-middleware-ai/.env \
-              -p 3001:3001 \
-              --log-driver json-file \
-              --log-opt max-size=50m \
-              --log-opt max-file=5 \
-              "${IMAGE}"
-
-            docker image prune -f --filter "until=24h"
-            echo "Staging deploy complete: ${IMAGE}"
-
-  # ── deploy production (AWS EC2 — requires approval) ──────────────────────────
-  deploy-production:
-    name: Deploy → production (AWS EC2)
-    needs: deploy-staging
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    # Create this environment in repo Settings → Environments → "production"
-    # and add required reviewers — that is the approval gate.
-    environment: production
-
-    steps:
-      - name: Tag image as :production in registry
-        run: |
-          echo "${{ secrets.REGISTRY_PASSWORD }}" \
-            | docker login ${{ env.REGISTRY }} \
-                -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
-
-          docker buildx imagetools create \
-            --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:production" \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.sha_tag }}"
-
-      - name: SSH deploy to production EC2
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.PROD_SSH_HOST }}
-          username: ${{ secrets.PROD_SSH_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}
-          script: |
-            set -e
-            IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.sha_tag }}"
-
-            echo "${{ secrets.REGISTRY_PASSWORD }}" \
-              | docker login ${{ env.REGISTRY }} \
-                  -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
-
-            docker pull "${IMAGE}"
-
-            docker stop pg-middleware-ai || true
-            docker rm   pg-middleware-ai || true
-
-            docker run -d \
-              --name pg-middleware-ai \
-              --restart unless-stopped \
-              --env-file /opt/pg-middleware-ai/.env \
-              -p 3001:3001 \
-              --log-driver json-file \
-              --log-opt max-size=50m \
-              --log-opt max-file=5 \
-              "${IMAGE}"
-
-            docker image prune -f --filter "until=24h"
-            echo "Production deploy complete: ${IMAGE}"

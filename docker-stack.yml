@@ -6,7 +6,7 @@ networks:
 
 services:
   app:
-    image: docker.kcic.co.id/pg-middleware-ai:${IMAGE_TAG:-staging}
+    image: docker.kcic.co.id/bridgepay-ai:${IMAGE_TAG:-staging}
     networks:
       - kcic_net
     environment:

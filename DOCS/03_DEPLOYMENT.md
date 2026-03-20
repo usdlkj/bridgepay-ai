@@ -173,7 +173,7 @@ nano /opt/pg-middleware-ai/docker-stack.yml
 ### 1. Pull the image
 
 ```bash
-docker pull docker.kcic.co.id/pg-middleware-ai:staging
+docker pull docker.kcic.co.id/bridgepay-ai:staging
 ```
 
 ### 2. Deploy the stack
@@ -257,7 +257,7 @@ IMAGE_TAG=<new-sha-tag> docker stack deploy -c docker-stack.yml pgmai
 Or to pull and redeploy the latest `:staging` tag:
 
 ```bash
-docker pull docker.kcic.co.id/pg-middleware-ai:staging
+docker pull docker.kcic.co.id/bridgepay-ai:staging
 set -a && source /opt/pg-middleware-ai/.env && set +a
 docker stack deploy -c /opt/pg-middleware-ai/docker-stack.yml pgmai
 ```
